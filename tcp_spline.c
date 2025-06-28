@@ -1,47 +1,58 @@
 /*
-Spline — это гибридный подход с элементами BBR и Cubic,
-адаптированный для нестабильных сетей или сетей с большим пропускной способности.
-Он зондирует пропускную способность и RTT, минимизирует ретрансмиссии и потенциально
-учитывает справедливость, что делает его похожим на BBR, но с собственной философией.
+Spline is a hybrid congestion control approach with elements of BBR and CUBIC,
+adapted for unstable or high-bandwidth networks. It probes bandwidth and RTT,
+minimizes retransmissions, and incorporates fairness estimation — making it
+similar to BBR but with its own design philosophy.
 
-Spline можно классифицировать как гибридный алгоритм управления перегрузкой
-с элементами модельно-ориентированного подхода или адаптивный зондирующий алгоритм,
-так как имеет гибридность, модельный подход, адаптивность и режимы поведения окна перегрузки
+Spline can be classified as a hybrid congestion control algorithm
+with elements of a model-based and adaptive probing approach,
+as it combines hybridization, estimation models, adaptiveness, and
+dynamic congestion window behavior.
 
-Гибридность:
-Комбинирует зондирование пропускной способности (как BBR) с адаптацией к
-потерям и RTT (как Cubic/Reno). Режимы PROBE_BW и PROBE_RTT алгоритм
-пытается балансировать между производительностью, задержками и потерями.
+Hybrid nature:
+Combines bandwidth probing (as in BBR) with loss and RTT responsiveness
+(as in Cubic/Reno). Modes like PROBE_BW and PROBE_RTT aim to balance
+performance, latency, and loss.
 
-Модельный подход:
-Использование bw и last_min_rtt для оценки состояния сети напоминает BBR,
-но с упором на минимизацию ретрансмиссий и справедливость (fairness_rat).
+Model-based elements:
+Uses `bw` and `last_min_rtt` to estimate network state (like BBR),
+but with an emphasis on minimizing retransmissions and improving fairness
+via the `fairness_rat` metric.
 
-Адаптивность:
-Spline имеет собственный счетчик эпох (epp), но при явных измении сети, алгоритм может решить,
-какой именно режим выбрать в тот же момент, когда появилась явные проблемы с сетью, помогает 
-в этом вопросе собственные реализации проверки на стабильность сети вместе с стандартными 
-механизмами на основе: inflight, RTT, ACK/SACK, bw_inflight и bw_ack.
+Adaptiveness:
+Spline uses its own epoch counter (`epp`), but when explicit
+network changes are detected, the algorithm can immediately decide
+which mode to switch to. This decision is based on custom stability checks
+alongside standard mechanisms like: inflight data, RTT, ACK/SACK feedback,
+`bw_inflight`, and `bw_ack`.
 
--------------------------------------------------------------------------------------------------------|
-fairness_rat - является метрикой справедливости канала, так же является усилителем для max_could_cwnd  |
-и метрикой проверки условии                                                                            |
-                                                                                                       |
-max_could_cwnd - является макс. допустимый cwnd, вычисляется:                                          |
-    max_could_cwnd = fairness_rat * bw(ack) / (bw(inflight) / 4) + G                                   |
-где, G:                                                                                                |
-if(scc->curr_ack > scc->last_ack)                                                                      |
-    G = scc->curr_ack / 2                                                                              |
-else                                                                                                   |
-    G = SEGMENT_SIZE * 2;                                                                              |
--------------------------------------------------------------------------------------------------------|
+---------------------------------------------------------------------------------------------------------
+`fairness_rat` — a fairness metric used both to influence `max_could_cwnd`
+and as a condition check amplifier.
 
-Spline имеет две основных режима: BW и RTT. У каждого при себе имеется разный подход 
-вычисления CWND, которые корректируется с помощью fairness_rat, ACK-ов, inflight и cwnd.
-Не мало важным является и вычисления максимально допустимого cwnd, который может быть
-итоговым cwnd(зависит так же от состояние сети). Если сеть стабильно: остается первый cwnd,
-если нет: второй cwnd(max_could_cwnd).                                                                            
+`max_could_cwnd` — maximum allowed congestion window, calculated as:
+
+    max_could_cwnd = fairness_rat * bw(ack) / (bw(inflight) / 4) + G
+
+Where G:
+    if (scc->curr_ack > scc->last_ack)
+        G = scc->curr_ack / 2;
+    else
+        G = SEGMENT_SIZE * 2;
+---------------------------------------------------------------------------------------------------------
+
+Spline operates primarily in two modes: BW and RTT.
+Each mode has its own way of calculating CWND, influenced by
+`fairness_rat`, ACK rate, inflight data, and current CWND.
+
+An important part of the design is the computation of the
+maximum allowed CWND (`max_could_cwnd`), which may override the
+currently calculated CWND if the network is unstable.
+
+- If the network is stable: the initial CWND is preserved.
+- If the network is unstable: `max_could_cwnd` is used instead.
 */
+
 
 #include <linux/module.h>
 #include <linux/kernel.h>
