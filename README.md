@@ -9,7 +9,6 @@ Spline is a state-machine-based algorithm with four modes: startup probing, band
 ### Key Features
 - **Adaptability**: Excels in high-loss scenarios (up to 11.4% packet loss) and jitter (up to 47.9 ms).
 - **Performance**: Achieves 25.3 MB/s compared to 20.3 MB/s with BBR in real tests.
-- **Compactness**: Approximately 250–270 lines of code (excluding comments), compared to 350–400 for BBR.
 - **Fairness**: Includes a fairness ratio to avoid dominating other flows.
 - **Efficiency**: Reduces retransmissions (12.6% vs. 13.6% for BBR) and kernel load.
 
