@@ -50,7 +50,6 @@ Spline is a state-machine-based algorithm with four modes: startup probing, band
 - Note: BBR performs better in controlled low-loss scenarios.
 
 ## Comparison with BBR
-- **Lines of Code**: Spline (~250–270 LOC) is ~30% more compact than BBR (~350–400 LOC), as measured with `cloc`.
 - **Strengths**: Spline excels in unstable networks with high loss and jitter.
 - **Limitations**: May underperform in low-bandwidth, low-loss conditions compared to BBR.
 
@@ -59,7 +58,3 @@ Feel free to fork this repository, submit issues, or propose enhancements. Sugge
 
 ## License
 This project is licensed under the GPL license. See the `MODULE_LICENSE("GPL")` in `tcp_spline.c` for details.
-
-## Acknowledgments
-- Thanks to the Linux kernel community for the foundation.
-- Special thanks to Bekzhan Kalimollayev for developing Spline.
