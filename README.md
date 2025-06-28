@@ -28,7 +28,7 @@ Spline is a state-machine-based algorithm with four modes: startup probing, band
 ## Test Results
 
 ### Real-World Network (Wi-Fi, Almaty)
-- **Conditions**: 5 GHz Wi-Fi, RTT 172.8–210.8 ms, packet loss 41.0–73.8%, jitter up to 47.9 ms.
+- **Conditions**: 5 GHz Wi-Fi, RTT 172.8–210.8 ms, jitter up to 47.9 ms.
 - **Task**: Download 2.99 GB file (`ubuntu-24.04.2-live-server-amd64.iso`).
 - **Spline**:
   - Speed: 25.3 MB/s (202.4 Mbit/s).
