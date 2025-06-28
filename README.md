@@ -26,6 +26,7 @@ Spline is a state-machine-based algorithm with four modes: startup probing, band
 - Analyze with Wireshark for packet loss and retransmissions.
 
 ## Test Results
+The results were obtained using tcpdump with the cpap extension for use in wireshark. The results are displayed in PDF files.
 
 ### Real-World Network (Wi-Fi, Almaty)
 - **Conditions**: 5 GHz Wi-Fi, RTT 172.8–210.8 ms, jitter up to 47.9 ms.
@@ -53,8 +54,6 @@ Spline is a state-machine-based algorithm with four modes: startup probing, band
 - **Strengths**: Spline excels in unstable networks with high loss and jitter.
 - **Limitations**: May underperform in low-bandwidth, low-loss conditions compared to BBR.
 
-## Contributing
-Feel free to fork this repository, submit issues, or propose enhancements. Suggestions for improving fairness or low-bandwidth performance are welcome!
 
 ## License
 This project is licensed under the GPL license. See the `MODULE_LICENSE("GPL")` in `tcp_spline.c` for details.
