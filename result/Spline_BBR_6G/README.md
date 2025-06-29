@@ -11,7 +11,8 @@ ubuntu-24.04.2-desktop-am 100%[=====================================>]   5.91G  
 
 tcp.analysis.lost_segment: 109891 (10.0%)
 tcp.analysis.retransmission: 16326 (1.5%) 
-----------------------------------------------------------------------------------
+
+
 Spline:
 Length: 6343219200 (5.9G) [application/x-iso9660-image]
 Saving to: ‘ubuntu-24.04.2-desktop-amd64.iso.2’
@@ -22,3 +23,6 @@ ubuntu-24.04.2-desktop-am 100%[=====================================>]   5.91G  
 
 971350 packets received by filter
 0 packets dropped by kernel
+
+tcp.analysis.lost_segment: 83997 (8.6%)
+tcp.analysis.retransmission: 11040 (1.1%)
