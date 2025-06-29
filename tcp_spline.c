@@ -54,24 +54,35 @@ currently calculated CWND if the network is unstable.
 */
 
 
+/*
+ * Spline Congestion Control for Linux Kernel
+ *
+ * This module implements a TCP congestion control algorithm designed to
+ * balance bandwidth probing, RTT probing, and fairness under varying network
+ * conditions. It uses a state machine with modes for startup, bandwidth probing,
+ * RTT probing, and drain probing.
+ *
+ * Author: Bekzhan Kalimollayev
+ * License: GPL
+ */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <net/tcp.h>
 
-#define SPLINE_SCALE    10
+#define SPLINE_SCALE        10
 #define EPOCH_ROUND     4
-#define SCALE_BW_RTT    4
+#define SCALE_BW_RTT        4
 #define BW_SCALE        12
 #define MIN_RTT_US      50000   /* 50 ms */
 #define MIN_BW          1448    /* Minimum bandwidth in bytes/sec */
 
-#define SCC_MIN_MSS     576
-#define SCC_MIN_RTT_WIN_SEC     10
+#define SCC_MIN_RTT_WIN_SEC 10
 #define SCC_MIN_ALLOWED_CWND    2
 #define SCC_MIN_SEGMENT_SIZE    1448
-#define SCC_MIN_RTT_ALLOWED_US  50000
 #define SCC_MIN_SND_CWND    (SCC_MIN_SEGMENT_SIZE * SCC_MIN_ALLOWED_CWND)
+#define SCC_MIN_RTT_ALLOWED_US  50000
 
 /* Congestion control modes */
 enum spline_cc_mode {
@@ -97,6 +108,7 @@ struct scc {
     u32 prior_cwnd;     /* Prior congestion window */
     u32 min_cwnd;       /* Minimum window */
     u32 curr_rtt;       /* Current RTT (us) */
+    u64 pacing_rate;        /* Pacing rate */
     u32 cwnd_gain;      /* Congestion window gain */
     u32 max_could_cwnd;     /* Max cwnd balancing bw and fairness */
     u32 curr_ack;       /* Newly delivered bytes */
@@ -119,15 +131,12 @@ static void stable_rtt_bw(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
 
-    if (scc->fairness_rat >= (3 << BW_SCALE) || ((u64)scc->bytes_in_flight << 1) < scc->curr_cwnd) {
-
-        /*проверка scc->last_ack < scc->curr_ack на возможные заддержки ACK-пакетов, 
-        чтобы не взорвать канал при нестабильности*/
+    if (scc->fairness_rat >= 3 || ((u64)scc->bytes_in_flight << 1) < scc->curr_cwnd) {
         if (scc->last_ack < scc->curr_ack)
             scc->curr_cwnd = (u32)((((u64)scc->curr_cwnd + scc->curr_ack) * 18) >> SCALE_BW_RTT);
         else
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 18) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -140,7 +149,7 @@ static void fairness_rtt_bw(struct sock *sk)
             scc->curr_cwnd = (u32)((((u64)scc->curr_cwnd + scc->curr_ack) * 8) >> SCALE_BW_RTT);
         else
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 14) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -157,7 +166,7 @@ static void overload_rtt_bw(struct sock *sk)
         if (((u64)scc->curr_ack << SCALE_BW_RTT) <
             (((u64)scc->last_ack << SCALE_BW_RTT) * 3) >> 2)
             scc->curr_cwnd = (scc->curr_cwnd * SPLINE_SCALE) >> SCALE_BW_RTT;
-        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -177,9 +186,9 @@ static void stable_rtt(struct sock *sk)
 
     if (scc->fairness_rat >= 3 || ((u64)scc->bytes_in_flight << 2) < scc->min_cwnd) {
         if (scc->last_ack < scc->curr_ack)
-            scc->curr_cwnd = max(scc->curr_cwnd + (scc->curr_ack >> 1), SCC_MIN_MSS);
+            scc->curr_cwnd = max(scc->curr_cwnd + (scc->curr_ack >> 1), 576U);
         else
-            scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+            scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -192,7 +201,7 @@ static void fairness_rtt(struct sock *sk)
             scc->curr_cwnd = (u32)((((u64)scc->curr_cwnd + scc->curr_ack) * 6) >> SCALE_BW_RTT);
         else
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 12) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -207,7 +216,7 @@ static void overload_rtt(struct sock *sk)
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 12) >> SCALE_BW_RTT);
         if (((u64)scc->curr_ack << SCALE_BW_RTT) < (((u64)scc->last_ack << SCALE_BW_RTT) * 3 >> 2))
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * SPLINE_SCALE) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_MSS);
+        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
 
@@ -307,7 +316,6 @@ static void update_bandwidth_throughput(struct sock *sk, const struct rate_sampl
     if (((u64)scc->throughput * 14 >> SCALE_BW_RTT) > scc->bw)
         scc->current_mode = MODE_DRAIN_PROBE;
 
-    /*проверка на макс.и мин. допустимый bw, на основе прошлого bw*/
     if (scc->last_bw != 0) {
         u64 min_allowed = (scc->last_bw * 3) >> 2;
         if (scc->bw < min_allowed)
@@ -316,7 +324,7 @@ static void update_bandwidth_throughput(struct sock *sk, const struct rate_sampl
         u64 max_allowed = (scc->last_bw * 6) >> 2;
         if (scc->bw > max_allowed)
             scc->bw = max_allowed;
-        /*провека на состояние RTT, тем самым решая, брать ли прошлый bw или оставить?*/
+
         if (scc->curr_rtt > (scc->last_min_rtt << 1))
             scc->bw = scc->last_bw;
     }
@@ -331,7 +339,6 @@ static void update_bandwidth_throughput(struct sock *sk, const struct rate_sampl
          scc->bytes_in_flight, scc->curr_cwnd);
 }
 
-/*другой метод определения потерь*/
 static bool is_loss(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -339,8 +346,6 @@ static bool is_loss(struct sock *sk)
     return (scc->prev_ca_state == TCP_CA_Loss && scc->curr_ack < scc->last_ack);
 }
 
-/*вычисления max_could_cwnd, текущее значение зависит от 
-fairness_rat, ACK/SACK и bw_ack/bw_inflight*/
 static void spline_max_cwnd(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -359,7 +364,7 @@ static void spline_max_cwnd(struct sock *sk)
     if (scc->max_could_cwnd == 0)
         scc->max_could_cwnd = scc->min_cwnd;
 }
-/*режим "слива" пакетов при явном проблем сети*/
+
 static void drain_probe(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -376,8 +381,6 @@ static void drain_probe(struct sock *sk)
     pr_debug("drain_probe: curr_cwnd=%u\n", scc->curr_cwnd);
 }
 
-/*начало передачи данных по каналу, так же учитывает состояние сети, на основе is_loss 
-и scc->curr_cwnd > scc->max_could_cwnd */
 static void start_probe(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -437,7 +440,6 @@ static void check_probes(struct sock *sk)
     }
 }
 
-/*Коэффициент усиления cwnd*/
 static u32 spline_cwnd_gain(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -649,6 +651,7 @@ static void spline_init(struct sock *sk)
     scc->prior_cwnd = 0;
     scc->epp = 0;
     scc->epp_min_rtt = 0;
+    scc->pacing_rate = 0;
     scc->bytes_in_flight = 0;
     scc->max_could_cwnd = 0;
     scc->cwnd_gain = 0;
