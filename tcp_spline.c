@@ -79,10 +79,9 @@ currently calculated CWND if the network is unstable.
 #define MIN_BW          1448    /* Minimum bandwidth in bytes/sec */
 
 #define SCC_MIN_RTT_WIN_SEC 10
-#define SCC_MIN_ALLOWED_CWND    2
+#define SCC_MIN_ALLOWED_CWND_SEGNETS    2
 #define SCC_MIN_SEGMENT_SIZE    1448
-#define SCC_MIN_SND_CWND    (SCC_MIN_SEGMENT_SIZE * SCC_MIN_ALLOWED_CWND)
-#define SCC_MIN_RTT_ALLOWED_US  50000
+#define SCC_MIN_SND_CWND    (SCC_MIN_SEGMENT_SIZE * SCC_MIN_ALLOWED_CWND_SEGNETS)
 
 /* Congestion control modes */
 enum spline_cc_mode {
@@ -239,7 +238,7 @@ static void update_min_rtt(struct sock *sk, const struct rate_sample *rs)
     if (tp->srtt_us)
         scc->curr_rtt = tp->srtt_us >> 3;
     else
-        scc->curr_rtt = SCC_MIN_RTT_ALLOWED_US;
+        scc->curr_rtt = MIN_RTT_US;
 
     if (scc->curr_rtt < scc->last_min_rtt || scc->last_min_rtt == 0) {
         pr_debug("update_min_rtt: updating last_min_rtt from %u to %u\n",
@@ -254,7 +253,7 @@ static void update_min_rtt(struct sock *sk, const struct rate_sample *rs)
     }
 
     if (scc->last_min_rtt == 0) {
-        scc->last_min_rtt = SCC_MIN_RTT_ALLOWED_US;
+        scc->last_min_rtt = MIN_RTT_US;
         pr_debug("update_min_rtt: last_min_rtt was 0, set to %u\n", scc->last_min_rtt);
     }
 
@@ -275,7 +274,7 @@ static void update_bandwidth_throughput(struct sock *sk, const struct rate_sampl
     u32 gamma, beta;
 
     if (scc->last_min_rtt == 0) {
-        scc->last_min_rtt = SCC_MIN_RTT_ALLOWED_US;
+        scc->last_min_rtt = MIN_RTT_US;
         pr_debug("update_bandwidth_throughput: last_min_rtt was 0, set to %u\n",
              scc->last_min_rtt);
     }
