@@ -70,7 +70,7 @@ static void stable_rtt_bw(struct sock *sk)
         scc->curr_cwnd = max(scc->curr_cwnd, 576U);
     }
 }
-
+// v2
 static u32 fairness_check(struct sock *sk, u32 cwnd)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -93,12 +93,14 @@ static u32 fairness_check(struct sock *sk, u32 cwnd)
     return cwnd;
 }
 
+// v2
 static bool ack_check(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
     return ((u64)scc->curr_ack << SCALE_BW_RTT) > (((u64)scc->last_ack << SCALE_BW_RTT) * 3 >> 2);
 }
 
+// v2
 static void fairness_rtt_bw(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -106,6 +108,7 @@ static void fairness_rtt_bw(struct sock *sk)
     if (scc->fairness_rat < 4) {
         u32 cwnd;
         cwnd = scc->curr_cwnd;
+        // v2
         cwnd = fairness_check(sk, cwnd);
         scc->curr_cwnd = max(cwnd, 576U);
     }
@@ -116,6 +119,7 @@ static void overload_rtt_bw(struct sock *sk)
     struct scc *scc = inet_csk_ca(sk);
 
     if ((scc->last_min_rtt * 20 << 4) < scc->curr_rtt) {
+        // v2
         if (ack_check(sk))
             scc->curr_cwnd = ((scc->curr_cwnd + scc->last_acked_sacked) * 11) >> SCALE_BW_RTT;
         else
@@ -143,6 +147,7 @@ static void stable_rtt(struct sock *sk)
     struct scc *scc = inet_csk_ca(sk);
 
     if (scc->fairness_rat >= 4 || ((u64)scc->bytes_in_flight << 2) < scc->min_cwnd) {
+        // v2
         if (ack_check(sk))
             scc->curr_cwnd = max(scc->curr_cwnd + (scc->last_acked_sacked >> 1), 576U);
         else
@@ -150,6 +155,7 @@ static void stable_rtt(struct sock *sk)
     }
 }
 
+// v2
 static void fairness_rtt(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -158,6 +164,7 @@ static void fairness_rtt(struct sock *sk)
         u32 cwnd;
         cwnd = scc->curr_cwnd;
         cwnd = fairness_check(sk, cwnd);
+        // v2
         scc->curr_cwnd = max(cwnd, 576U);
     }
 }
@@ -308,6 +315,7 @@ static bool is_loss(struct sock *sk)
     return (scc->prev_ca_state == TCP_CA_Loss && scc->curr_ack < scc->last_ack);
 }
 
+// v2
 static void spline_max_cwnd(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -322,10 +330,13 @@ static void spline_max_cwnd(struct sock *sk)
     if (scc->max_could_cwnd == 0)
         scc->max_could_cwnd = scc->min_cwnd;
 
+    // v2
     if(scc->bytes_in_flight < SCC_MIN_SEGMENT_SIZE << 6)
     {
-        scc->max_could_cwnd = scc->max_could_cwnd + scc->max_could_cwnd << 1;
-        scc->max_could_cwnd = max(scc->last_max_cwnd, scc->max_could_cwnd);
+        if(ack_check(sk) && scc->last_min_rtt * 3 << 1 < scc->curr_rtt)
+            scc->max_could_cwnd = scc->max_could_cwnd + scc->max_could_cwnd << 1;
+        else
+            scc->max_could_cwnd = max(scc->last_max_cwnd, scc->max_could_cwnd);
     }
     
     printk(KERN_DEBUG "max_cwnd: scc->max_could_cwnd=%u\n",
@@ -425,6 +436,7 @@ static u32 spline_cwnd_gain(struct sock *sk)
     return (u32)(div_u64((u64)scc->curr_cwnd << BW_SCALE, denom));
 }
 
+// v2
 static u32 spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -440,9 +452,10 @@ static u32 spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
     printk(KERN_DEBUG "cwnd_next_gain: before curr_cwnd=%u, max_could_cwnd=%u, scc->cwnd_gain=%u\n",
          scc->curr_cwnd, scc->max_could_cwnd, scc->cwnd_gain);
 
+    // v2
     if (is_loss(sk) && scc->throughput > scc->bw << 4)
     {
-        if(scc->last_acked_sacked < 1 << 16)
+        if(scc->last_acked_sacked < 1 << 16 && scc->last_min_rtt * 3 >> 1 < scc->curr_rtt)
             scc->curr_cwnd = scc->max_could_cwnd + scc->last_acked_sacked * 3 >> 1;
         else 
             scc->curr_cwnd = scc->max_could_cwnd;
