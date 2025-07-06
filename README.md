@@ -1,118 +1,128 @@
-# TCP Congestion Control Algorithm Spline
+# Spline: TCP Congestion Control Algorithm
 
-## Introduction
+## Project Overview
 
-The **Spline** algorithm is a TCP congestion control module developed for the Linux kernel, optimized for unstable network conditions such as wireless networks with high packet loss and significant delays. It combines elements of the **BBR** (Bottleneck Bandwidth and Round-trip propagation time) model with adaptive loss-oriented algorithms (Cubic/Reno) to maximize throughput and minimize latency. Key objectives include:
+**Spline** is a custom TCP congestion control algorithm designed for the Linux kernel, inspired by BBR, and aimed at optimizing network connection performance. Unlike traditional algorithms such as TCP Reno or CUBIC, Spline employs a proactive approach by estimating available bandwidth, round-trip time (RTT), and ensuring fair resource allocation among competing flows. The algorithm is well-suited for high-speed and dynamic network environments where high throughput and minimal packet loss are critical.
 
-- Maximizing throughput.
-- Minimizing latency (RTT).
-- Reducing retransmissions.
-- Ensuring fair resource allocation.
+## Key Features
 
-## Architecture and Operating Principles
+- **Proactive Network Probing**: Dynamically adapts to network conditions by actively analyzing its state.
+- **Bandwidth and RTT Optimization**: Balances high throughput with minimal latency.
+- **Fairness**:
+  - The `fairness_rat` coefficient prevents bandwidth monopolization by individual flows.
+  - The `fairness_check()` function detects channel contention and adjusts the congestion window accordingly.
+- **Modular Architecture**: Utilizes a finite state machine with four operational modes: initial probing, bandwidth probing, RTT probing, and drainage.
 
-Spline is a hybrid algorithm with a model-oriented approach and adaptive logic. It integrates bandwidth probing (as in BBR) with adaptation to packet loss and latency (as in Cubic/Reno), using estimated bandwidth (`bw`) and minimum RTT (`last_min_rtt`) to assess network conditions.
+## How Spline Works
 
-The algorithm dynamically switches modes based on network state, leveraging an epoch counter (`epp`) and custom stability checks. This allows adaptation to variable channel conditions, such as sudden latency spikes or packet loss (see *Response to Instability*).
+Spline manages congestion through a finite state machine comprising four modes:
 
-## Main Operating Modes
+1. **Initial Probing (MODE_START_PROBE)**:  
+   Increases the congestion window to assess available bandwidth.
+2. **Bandwidth Probing (MODE_PROBE_BW)**:  
+   Aggressively increases the congestion window with moderate reductions as needed.
+3. **RTT Probing (MODE_PROBE_RTT)**:  
+   Moderately increases the congestion window, aggressively reduces it during congestion, or maintains stability when appropriate.
+4. **Drainage (MODE_DRAIN_PROBE)**:  
+   Reduces the congestion window upon detecting congestion or packet loss to stabilize the network.
 
-Spline uses a state machine with four modes and adaptive transitions:
+### Mode Transitions
+- Transitions occur:
+  - Periodically, every 4 epochs (`EPOCH_ROUND`).
+  - Triggered by events such as packet loss, significant RTT increases, or growth in bytes in flight (`inflight`).
 
-- **MODE_START_PROBE**: Doubles `curr_cwnd` for initial transmission, constrained by `max_could_cwnd` and loss detection.
-- **MODE_PROBE_BW**: Aggressively increases `cwnd`, adjusting growth via `fairness_rat` for competition.
-- **MODE_PROBE_RTT**: Reduces `cwnd` to minimize queuing and RTT, considering stability and load.
-- **MODE_DRAIN_PROBE**: Lowers the window to estimated bandwidth during congestion to clear queues.
+### Congestion Window Adjustment
+- **Initial Probing**: Doubles the congestion window, adding the minimum segment size.
+- **Bandwidth Probing**: Aggressively increases the window with moderate reductions.
+- **RTT Probing**: Moderately increases the window, aggressively reduces it during congestion, or maintains its current level as needed.
+- **Drainage**: Reduces the window to the estimated bandwidth to stabilize the network.
+- **spline_max_cwnd**: Determines an alternative congestion window based on the ratio of acknowledged data to bytes in flight, factoring in the fairness coefficient.
+- **spline_cwnd_next_gain**: Selects between the current window (`curr_cwnd`), the maximum allowable window (`max_could_cwnd`), and the maximum window observed during the connection (`last_max_cwnd`) based on network metrics (ACK/SACK, inflight, minRTT, packet loss).
 
-Mode transitions are managed by `check_probes`, based on `epp` and anomaly detection.
+### Parameter Estimation
+- **RTT**: Updates minimum and current RTT based on averaged values or new measurements.
+- **Bandwidth**: Estimated from acknowledged bytes and bytes in flight, smoothed for stability.
+- **Fairness**: Calculated as the ratio of bandwidth to throughput, preventing monopolization.
+- **Acknowledgment History**: Algorithm behavior depends on the history of acknowledgments (`last_ack`, `curr_ack`).
+- **Packet Loss**: Accounted for through acknowledgment history and the `TCP_CA_Loss` flag.
 
-## Custom Implementations
+## Mininet Test Results
 
-Spline introduces unique metrics and mechanisms:
+Tests were conducted on a channel with a bandwidth of 10 Mbps and a delay of 20 ms. The following table summarizes the performance comparison of Spline against other congestion control algorithms (CUBIC, Reno, BBR) across various configurations.
 
-- **fairness_rat**: Fairness metric, calculated as `(bw / throughput) + 1`. Regulates `cwnd` aggressiveness and enhances `max_could_cwnd`. Reduces aggression when `< 3` to yield to competitors.
-- **max_could_cwnd**: Dynamically computed maximum `cwnd`, balancing bandwidth and fairness:  
-  `max_could_cwnd = fairness_rat * bw_ack / (bw_inflight/4) + G`  
-  where \( G = curr_ack / 2 \) if `curr_ack > last_ack`, else \( SEGMENT_SIZE * 2 \). Limits `curr_cwnd` during congestion or loss.
-- **bw_inflight (In-flight Bandwidth)**: Estimates bandwidth from `bytes_in_flight`:  
-  `throughput = bytes_in_flight * USEC_PER_SEC * (1 << BW_SCALE) / last_min_rtt`. Reflects network load for `fairness_rat` and congestion assessment.
+| Test | Configuration | Average Throughput (Mbps) | Jain’s Fairness Index (J) | Retransmissions (Retr) | Total Throughput (Mbps) |
+|------|---------------|---------------------------|---------------------------|------------------------|-------------------------|
+| 1 | Spline 4, CUBIC 5 | Spline: 1.75, CUBIC: 0.83 | Overall: 0.817, Spline: 0.992, CUBIC: 0.755 | Spline: 833, CUBIC: 463 | 11.166 |
+| 2 | Spline 4, Reno 5 | Spline: 1.525, Reno: 1.149 | Overall: 0.823, Spline: 0.918, Reno: 0.833 | Spline: 213.5, Reno: 966.4 | 11.84 |
+| 3 | Spline 4, Reno 4 | Spline: 1.132, Reno: 1.313 | Overall: 0.924, Spline: 0.963, Reno: 0.822 | Spline: 267.75, Reno: 1435.2 | 9.154 |
+| 4 | Spline 4, CUBIC 4 | Spline: 1.435, CUBIC: 0.823 | Overall: 0.988, Spline: 0.954, CUBIC: 0.785 | Spline: 945, CUBIC: 533 | 8.94 |
+| 5 | Spline 2, CUBIC 4 | Spline: 1.675, CUBIC: 0.974 | Overall: 0.891, Spline: 0.960, CUBIC: 0.809 | Spline: 563, CUBIC: 822 | 7.246 |
+| 6 | Spline 2, Reno 4 | Spline: 2.26, Reno: 2.0175 | Overall: 0.981, Spline: 1.0, Reno: 0.918 | Spline: 465, Reno: 1191 | 12.59 |
+| 7 | Spline 9 | Spline: 1.36 | Overall: 0.953 | Spline: 0 | 10.49 |
+| 8 | Spline, CUBIC | Spline: 4.39, CUBIC: 6.38 | Overall: 0.967 | Spline: 1124, CUBIC: 2005 | 10.77 |
+| 9 | Spline, Reno | Spline: 4.23, Reno: 5.66 | Overall: 0.980 | Spline: 44, Reno: 242 | 9.89 |
+| 10 | Spline 4, BBR 5 | Spline: 1.43, BBR: 0.981 | Overall: 0.940, Spline: 0.964, BBR: 0.951 | Spline: 271, BBR: 18 | 10.146 |
 
-These are integrated into functions like `probe_bw`, `probe_rtt`, `start_probe`, and `drain_probe`.
+### Key Observations
+- **Throughput**: Spline outperforms CUBIC and Reno in most tests, particularly in configurations with fewer flows (e.g., Spline 2 vs. CUBIC 4: 1.675 Mbps vs. 0.974 Mbps). However, in some cases (e.g., Spline vs. CUBIC, Reno), traditional algorithms achieve higher throughput.
+- **Fairness**: Spline exhibits a high Jain’s Fairness Index within its group, often approaching 1.0, indicating equitable resource distribution.
+- **Retransmissions**: Spline generally has fewer retransmissions compared to Reno but may be less stable than BBR (e.g., Spline 4 vs. BBR 5: 271 vs. 18 retransmissions).
+- **Overall Performance**: Spline delivers consistent performance under high contention, particularly in tests with heavy network loads.
 
-## Response to Network Instability
-
-Spline is designed for unstable and congested conditions:
-
-- **Channel Congestion**: Activates `MODE_DRAIN_PROBE` if `curr_cwnd` exceeds `bw` or `curr_rtt` increases ~1.25x over `last_min_rtt`, reducing the window to `bw`.
-- **ACK Instability**: Checks `last_ack < curr_ack`; limits `cwnd` growth if ACKs lag, preventing traffic spikes.
-- **Bufferbloat**: Reduces `curr_cwnd` via `overload_rtt_bw` and `stable_rtt_bw` if `curr_rtt` exceeds `last_min_rtt` by >1.25x to clear queues.
-- **RTT Variability**: Updates `last_min_rtt` every 10 seconds or on new minima, adapting to latency changes.
-
-This ensures dynamic response to jitter, loss, and queues.
-
-## Comparison with BBR
-
-Spline shares BBR's model-oriented approach (using `bw` and `last_min_rtt`), but differs in adaptation:
-
-- **Fairness and Loss**: Introduces `fairness_rat` and `max_could_cwnd` to yield to congested flows and reduce `cwnd` during losses, unlike BBR.
-- **Instability Adaptation**: Targets wireless/unstable networks, responding to ACK delays, RTT spikes, and losses via mode transitions, while BBR is optimized for stable channels.
-- **Aggressiveness**: Adjusts `cwnd` growth based on load and `fairness_rat`, unlike BBR's constant target, slowing growth in poor conditions.
-
-Spline excels in high-loss/jitter scenarios; BBR suits stable, high-throughput channels.
-
-## Results
-
-- **Testing Conditions**: Almaty, Kazakhstan; 500 Mbps internet, 5 GHz Wi-Fi.
-- **Platform**: Ubuntu 24.04.2 LTS (Linux 6.8.12), 4 GB RAM, Wi-Fi, using `wget`.
-
-#### 3 GB File (ubuntu-24.04.2-live-server-amd64.iso)
-- **BBR**: ~16.0 MB/s (2.99 GB in 3 min 38 s), 11.9% lost segments, 13.6% retransmissions.
-- **Spline**: ~19.6 MB/s (2.99 GB in 2 min 20 s), 11.4% lost segments, 12.6% retransmissions.
-
-#### 6 GB File (ubuntu-24.04.2-desktop-amd64.iso)
-- **BBR**: ~17.1 MB/s (5.91 GB in 7 min 12 s), 10.0% lost segments, 1.5% retransmissions.
-- **Spline**: ~19.8 MB/s (5.91 GB in 5 min 06 s), 8.6% lost segments, 1.1% retransmissions.
-
-#### 6 GB File with 20% (±5%) Loss
-- **Config**: `tc qdisc add dev enp0s3 root netem loss 20% 5%`
-- **BBR**: ~11.3 MB/s (5.91 GB in 8 min 56 s), 8.4% lost segments, 0.5% retransmissions.
-- **Spline**: ~13.2 MB/s (5.91 GB in 7 min 38 s), 10.5% lost segments, 0.6% retransmissions.
-
-### Conclusion
-- Spline achieves higher speeds (13.2–19.8 MB/s) than BBR (11.3–17.1 MB/s), reducing transfer time.
-- In the first two tests, Spline shows lower loss and retransmissions with higher speeds.
-- With 20% (±5%) loss, Spline trades some loss for higher throughput.
-- Spline is more aggressive and efficient under high instability.
-
-## Potential Improvements
-
-- Optimize for low-bandwidth networks (e.g., 10 Mbps emulation).
-- Test and calibrate `fairness_rat` under multi-flow competition.
-- Refine ACK delay checks.
+## Compatibility
+Currently compatible with Linux kernel version `6.8.12`.
 
 ## Installation
 
-1. **Clone the Repository**  
+To install the Spline algorithm, follow these steps:
+
+1. Clone the repository:
    ```bash
-   git clone https://github.com/Kaibek/tcp_spline.git
+   git clone https://github.com/kaibek/tcp_spline.git
+   ```
+2. Compile the kernel module:
+   ```bash
    cd tcp_spline
+   make
+   ```
+3. Load the module:
+   ```bash
+   sudo insmod tcp_spline.ko
+   ```
+4. Set Spline as the congestion control algorithm:
+   ```bash
+   sudo sysctl -w net.ipv4.tcp_congestion_control=spline_cc
    ```
 
-2. **Build the Module**  
-   - Copy `tcp_spline.c` to the kernel source directory (e.g., `net/ipv4/`).
-   - Configure the kernel: `make menuconfig` and enable custom congestion control.
-   - Build: `make -C /lib/modules/$(uname -r)/build M=$(pwd) modules`.
-   - Insert: `insmod tcp_spline.ko`.
+## Configuration
 
-3. **Activate Spline**  
-   - Set as active: `sudo sysctl -w net.ipv4.tcp_congestion_control=spline`.
-   - Verify: `sysctl net.ipv4.tcp_congestion_control` (should show `spline`).
+Configurable parameters include:
 
+- **`EPOCH_ROUND`** (default: 4): Frequency of mode transitions.
+- **`MIN_RTT_US`** (default: 50 ms): Minimum RTT value.
+- **`BW_SCALE`** (default: 12): Scaling factor for bandwidth estimation.
+
+To modify these parameters:
+1. Edit the module’s source code.
+2. Recompile and reload the module.
+
+## Usage
+
+Once installed, Spline is automatically applied to all new TCP connections. To verify the current congestion control algorithm, execute:
+
+```bash
+sysctl net.ipv4.tcp_congestion_control
+```
+
+Expected output:
+```
+net.ipv4.tcp_congestion_control = spline_cc
+```
 
 ## License
 
-This project is licensed under the GPL. See `MODULE_LICENSE("GPL")` in `tcp_spline.c` for details.
+The source code is distributed under the [GNU General Public License v2.0 (GPLv2)](LICENSE).
 
-## Acknowledgments
+## Contact
 
-Thanks to the Linux kernel community and special gratitude to Bekzhan Kalimollayev for developing Spline.
+For questions, suggestions, or contributions, please create an issue in the repository or contact us at [kalimollaevbekzhan777@gmail.com](mailto:kalimollaevbekzhan777@gmail.com).
