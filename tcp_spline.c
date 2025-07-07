@@ -15,12 +15,13 @@
 #define SCC_MIN_SEGMENT_SIZE    1448
 #define SCC_MIN_SND_CWND    (SCC_MIN_SEGMENT_SIZE * SCC_MIN_ALLOWED_CWND_SEGNETS)
 
+static u8 thresh_fairness_scale = 3;
 /* Congestion control modes */
 enum spline_cc_mode {
     MODE_START_PROBE,
     MODE_PROBE_BW,
+    MODE_DRAIN_PROBE,
     MODE_PROBE_RTT,
-    MODE_DRAIN_PROBE
 };
 
 /* Private data for spline congestion control */
@@ -67,14 +68,14 @@ static void stable_rtt_bw(struct sock *sk)
             scc->curr_cwnd = (u32)((((u64)scc->curr_cwnd + scc->last_acked_sacked) * 18) >> SCALE_BW_RTT);
         else
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 18) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
+        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 // v2
 static u32 fairness_check(struct sock *sk, u32 cwnd)
 {
     struct scc *scc = inet_csk_ca(sk);
-    if(scc->bytes_in_flight << 4 < cwnd && scc->last_min_rtt * 3 << 1 > scc->curr_rtt)
+    if(scc->bytes_in_flight << thresh_fairness_scale < cwnd && scc->last_min_rtt * 3 << 1 > scc->curr_rtt)
     {
         if(scc->bytes_in_flight << 6 > cwnd)
             cwnd = cwnd - ((cwnd >> 4) + cwnd >> 5);
@@ -110,7 +111,7 @@ static void fairness_rtt_bw(struct sock *sk)
         cwnd = scc->curr_cwnd;
         // v2
         cwnd = fairness_check(sk, cwnd);
-        scc->curr_cwnd = max(cwnd, 576U);
+        scc->curr_cwnd = max(cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 
@@ -128,7 +129,7 @@ static void overload_rtt_bw(struct sock *sk)
         if (((u64)scc->curr_ack << SCALE_BW_RTT) <
             (((u64)scc->last_ack << SCALE_BW_RTT) * 3) >> 2)
             scc->curr_cwnd = (scc->curr_cwnd * SPLINE_SCALE) >> SCALE_BW_RTT;
-        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
+        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 
@@ -149,9 +150,9 @@ static void stable_rtt(struct sock *sk)
     if (scc->fairness_rat >= 4 || ((u64)scc->bytes_in_flight << 2) < scc->min_cwnd) {
         // v2
         if (ack_check(sk))
-            scc->curr_cwnd = max(scc->curr_cwnd + (scc->last_acked_sacked >> 1), 576U);
+            scc->curr_cwnd = max(scc->curr_cwnd + (scc->last_acked_sacked >> 1), SCC_MIN_SEGMENT_SIZE);
         else
-            scc->curr_cwnd = max(scc->curr_cwnd, 576U);
+            scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 
@@ -165,7 +166,7 @@ static void fairness_rtt(struct sock *sk)
         cwnd = scc->curr_cwnd;
         cwnd = fairness_check(sk, cwnd);
         // v2
-        scc->curr_cwnd = max(cwnd, 576U);
+        scc->curr_cwnd = max(cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 
@@ -180,7 +181,7 @@ static void overload_rtt(struct sock *sk)
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * 12) >> SCALE_BW_RTT);
         if (((u64)scc->curr_ack << SCALE_BW_RTT) < (((u64)scc->last_ack << SCALE_BW_RTT) * 3 >> 2))
             scc->curr_cwnd = (u32)(((u64)scc->curr_cwnd * SPLINE_SCALE) >> SCALE_BW_RTT);
-        scc->curr_cwnd = max(scc->curr_cwnd, 576U);
+        scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SEGMENT_SIZE);
     }
 }
 
