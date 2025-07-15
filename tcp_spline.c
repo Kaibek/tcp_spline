@@ -84,7 +84,8 @@ static void fairness_check(struct sock *sk)
 static bool ack_check(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
-    return ((u64)scc->curr_ack << SCALE_BW_RTT) > (((u64)scc->last_ack << SCALE_BW_RTT) * 3 >> 2);
+    return ((u64)scc->curr_ack << SCALE_BW_RTT) > (((u64)scc->last_ack << SCALE_BW_RTT) * 3 >> 2 
+        && scc->last_ack > SCC_MIN_SND_CWND);
 }
 
 static bool rtt_check(struct sock *sk)
@@ -412,31 +413,34 @@ static u32 spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
     spline_max_cwnd(sk);
     spline_tcp_loss(sk);
 
-    if(ack_check(sk) && scc->last_ack > SCC_MIN_SND_CWND)
-        scc->cwnd_gain = spline_cwnd_gain(sk, scc->last_ack);
-    else
-        scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_ack);
-    if(scc->cwnd_gain < 65536U)
-        scc->cwnd_gain = 65536U;
-
-    denom = scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
-    tmp = scc->fairness_rat * (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
-
     printk(KERN_DEBUG "cwnd_next_gain: before curr_cwnd=%u, max_could_cwnd=%u, cwnd_gain=%u, unfair_flag=%u, last_cwnd=%u, curr_rtt=%u\n",
          scc->curr_cwnd, scc->max_could_cwnd, scc->cwnd_gain, scc->unfair_flag, scc->last_cwnd, scc->curr_rtt);
-    scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> (BW_SCALE_2 + BW_SCALE_2)) + scc->max_could_cwnd;
 
-    if((ack_check(sk) && rtt_check(sk)) || scc->unfair_flag >= 10)
+    if((ack_check(sk) || (rtt_check(sk)) && scc->unfair_flag >= 10))
     {   
         scc->cwnd_gain = spline_cwnd_gain(sk, scc->last_ack);
+        if(scc->cwnd_gain < 65536U)
+            scc->cwnd_gain = 65536U;
         denom = scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
-        if((ack_check(sk) && rtt_check(sk)) && scc->unfair_flag >= 50)
+        if( scc->unfair_flag >= 50)
             denom = (denom + scc->curr_rtt) >> 1;
         else
             denom = denom;
         tmp = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
         printk(KERN_DEBUG "cwnd_next_gain_inslide: after curr_cwnd=%u\n", scc->curr_cwnd);
         scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> BW_SCALE_2) + scc->max_could_cwnd;
+        scc->curr_cwnd += scc->curr_ack >> 3;
+    }
+    else
+    {
+        scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_ack);
+        if(scc->cwnd_gain < 65536U)
+            scc->cwnd_gain = 65536U;
+
+        denom = scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
+        tmp = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
+        scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> BW_SCALE_2) + scc->max_could_cwnd;
+        scc->curr_cwnd += scc->curr_ack;
     }
     printk(KERN_DEBUG "cwnd_next_gain: after curr_cwnd=%u, scc->loss_flag=%u\n", scc->curr_cwnd, scc->max_could_cwnd);
     return scc->curr_cwnd;
