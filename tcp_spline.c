@@ -412,26 +412,31 @@ static u32 spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
     spline_max_cwnd(sk);
     spline_tcp_loss(sk);
 
-    scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_cwnd);
+    if(ack_check(sk) && scc->last_ack > SCC_MIN_SND_CWND)
+        scc->cwnd_gain = spline_cwnd_gain(sk, scc->last_ack);
+    else
+        scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_ack);
     if(scc->cwnd_gain < 65536U)
         scc->cwnd_gain = 65536U;
 
     denom = scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
-    tmp = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
+    tmp = scc->fairness_rat * (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
 
     printk(KERN_DEBUG "cwnd_next_gain: before curr_cwnd=%u, max_could_cwnd=%u, cwnd_gain=%u, unfair_flag=%u, last_cwnd=%u, curr_rtt=%u\n",
          scc->curr_cwnd, scc->max_could_cwnd, scc->cwnd_gain, scc->unfair_flag, scc->last_cwnd, scc->curr_rtt);
-    scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> BW_SCALE_2) + scc->max_could_cwnd;
+    scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> (BW_SCALE_2 + BW_SCALE_2)) + scc->max_could_cwnd;
 
-    if((scc->curr_rtt > (scc->last_min_rtt * 3 >> 1) ||
-        scc->curr_ack < (scc->last_ack * 3 >> 2) && scc->unfair_flag >= 30))
+    if((ack_check(sk) && rtt_check(sk)) || scc->unfair_flag >= 10)
     {   
-        printk(KERN_DEBUG "cwnd_next_gain_inslide: after curr_cwnd=%u\n", scc->curr_cwnd);
-        if(scc->max_could_cwnd < (1 << 15))
-            scc->curr_cwnd = scc->max_could_cwnd + (((scc->fairness_rat * (scc->max_could_cwnd ? 
-                scc->max_could_cwnd : SCC_MIN_SND_CWND) << 4)) >> BW_SCALE_2);
+        scc->cwnd_gain = spline_cwnd_gain(sk, scc->last_ack);
+        denom = scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
+        if((ack_check(sk) && rtt_check(sk)) && scc->unfair_flag >= 50)
+            denom = (denom + scc->curr_rtt) >> 1;
         else
-            scc->curr_cwnd = scc->max_could_cwnd + ((scc->fairness_rat * (scc->max_could_cwnd << 3)) >> BW_SCALE_2);
+            denom = denom;
+        tmp = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
+        printk(KERN_DEBUG "cwnd_next_gain_inslide: after curr_cwnd=%u\n", scc->curr_cwnd);
+        scc->curr_cwnd = (u32)(div_u64(tmp, denom) >> BW_SCALE_2) + scc->max_could_cwnd;
     }
     printk(KERN_DEBUG "cwnd_next_gain: after curr_cwnd=%u, scc->loss_flag=%u\n", scc->curr_cwnd, scc->max_could_cwnd);
     return scc->curr_cwnd;
