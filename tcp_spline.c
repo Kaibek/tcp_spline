@@ -73,7 +73,7 @@ static bool check_hight_rtt(struct sock *sk)
         (scc->last_rtt + scc->rtt_epoch ) > scc->curr_rtt);
 }
 
-//Проверка на стабильность RTT при высоких RTT
+//Проверка на стабильность RTT 
 static bool ack_check(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
@@ -93,7 +93,7 @@ static bool rtt_check(struct sock *sk)
 static void hight_rtt_round(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
-    if(!check_hight_rtt(sk));
+    if(!check_hight_rtt(sk))
         scc->hight_round++;
 
     if(scc->hight_round == 50 && !ack_check(sk) && 
@@ -127,8 +127,7 @@ static void fairness_rtt(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
 
-    if (!rtt_check(sk) < scc->curr_rtt && 
-        scc->unfair_flag >= 20) {
+    if ( scc->unfair_flag >= 20) {
 
         u32 cwnd;
         if(scc->bytes_in_flight)
