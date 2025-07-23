@@ -15,7 +15,6 @@
 #define SCC_MIN_SEGMENT_SIZE    1448
 #define SCC_MIN_SND_CWND    (SCC_MIN_SEGMENT_SIZE * SCC_MIN_ALLOWED_CWND_SEGNETS)
 
-/* Congestion control modes */
 enum spline_cc_mode {
     MODE_START_PROBE,
     MODE_PROBE_BW,
@@ -23,7 +22,6 @@ enum spline_cc_mode {
     MODE_DRAIN_PROBE
 };
 
-/* Private data for spline congestion control */
 struct scc {
     u32 curr_cwnd;      /* Current congestion window (bytes) */
     u32 throughput;     /* Throughput from in_flight */
@@ -32,38 +30,29 @@ struct scc {
     u32 last_min_rtt;       /* Minimum RTT (us) */
     u32 last_ack;       /* Last acknowledged bytes */
     u32 last_acked_sacked;  /* ACKed+SACKed bytes */
-    u32 mss;            /* Maximum Segment Size */
+    u16 mss;            /* Maximum Segment Size */
     u32 prior_cwnd;     /* Prior congestion window */
-    u32 min_cwnd;       /* Minimum window */
+    u16 min_cwnd;       /* Minimum window */
     u32 curr_rtt;       /* Current RTT (us) */
     u32 cwnd_gain;      /* Congestion window gain */
     u32 max_could_cwnd;     /* Max cwnd balancing bw and fairness */
     u32 curr_ack;       /* Newly delivered bytes */
     u32 fairness_rat;       /* Fairness ratio */
-    u32 current_mode:3;       /* Current mode (START_PROBE, etc.) */
+    u8 current_mode:3;       /* Current mode (START_PROBE, etc.) */
     u32 bytes_in_flight;    /* Bytes in flight */
     u32 last_rtt;
     u32 rtt_epoch;
-    u8  epp_min_rtt;        /* Epoch counter for min RTT */
-    u8  epp;            /* Epoch cycle counter */
+    u8 epp_min_rtt;        /* Epoch counter for min RTT */
+    u8 epp;            /* Epoch cycle counter */
     u8 EPOCH_ROUND;
-    u8 unfair_flag;
-    u8 prev_ca_state:3;    /* Previous TCP_CA state */
+    u16 unfair_flag;
+    u16 stable_flag;
+    u8 prev_ca_state;    /* Previous TCP_CA state */
     u8 hight_round;
 };
 
 static void update_bytes_in_flight(struct sock *sk);
 static void update_last_acked_sacked_cwnd_mss(struct sock *sk, const struct rate_sample *rs);
-
-static void fairness_check(struct sock *sk)
-{
-    struct scc *scc = inet_csk_ca(sk);
-    if(scc->curr_rtt > (scc->last_min_rtt * 3 >> 1) &&
-        scc->curr_ack < scc->last_ack)
-    {
-        scc->unfair_flag++;
-    }
-}
 
 // Проверка на стабильность высоких RTT 
 static bool check_hight_rtt(struct sock *sk)
@@ -78,8 +67,9 @@ static bool check_hight_rtt(struct sock *sk)
 static bool ack_check(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
-    return ((u64)scc->curr_ack << SCALE_BW_RTT) < (((u64)scc->last_ack << SCALE_BW_RTT)
-        && scc->last_ack > SCC_MIN_SND_CWND);
+    return ((scc->curr_ack < scc->last_ack + 7000U && 
+        scc->last_ack > SCC_MIN_SND_CWND) && 
+    scc->curr_ack > scc->last_ack + SCC_MIN_SEGMENT_SIZE);
 }
 
 //Проверка на стабильность RTT
@@ -97,7 +87,7 @@ static void hight_rtt_round(struct sock *sk)
     if(!check_hight_rtt(sk))
         scc->hight_round++;
 
-    if(scc->hight_round == 50 && !ack_check(sk) && 
+    if(scc->hight_round == 50 && ack_check(sk) && 
         scc->bytes_in_flight > scc->curr_cwnd)
     {
         scc->hight_round = 0;
@@ -113,31 +103,67 @@ static void hight_rtt_round(struct sock *sk)
          scc->hight_round, scc->rtt_epoch);
 }
 
+static u32 percent_fine(struct sock *sk, u32 unfair_flag, u32 cwnd)
+{
+    struct scc *scc = inet_csk_ca(sk);
+    if(scc->last_min_rtt + 10000 < scc->curr_rtt && unfair_flag > 60)
+        unfair_flag = unfair_flag;
+    else if(unfair_flag > 60)
+        unfair_flag = 60;
+
+    u32 a;
+    unfair_flag <<= BW_SCALE;
+    a = unfair_flag * 3 >> 2;
+    cwnd -= ((cwnd * a) / 100) >> BW_SCALE;
+    return cwnd;
+}
+
+static void fairness_check(struct sock *sk)
+{
+    struct scc *scc = inet_csk_ca(sk);
+    if(scc->unfair_flag == 1 << 16)
+        scc->unfair_flag = 1 << 16;
+
+    else if(!rtt_check(sk) &&
+        ack_check(sk) && !check_hight_rtt(sk))
+        scc->unfair_flag++;
+}
+
+static void stable_check(struct sock *sk)
+{
+    struct scc *scc = inet_csk_ca(sk);
+    if(scc->stable_flag == 1 << 16)
+        scc->stable_flag = 1 << 16;
+
+    else if(rtt_check(sk) &&
+        !ack_check(sk))
+        scc->stable_flag++;
+}
+
 static void stable_rtt(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
 
     if (rtt_check(sk) && 
-        !ack_check(sk)) {
+        ack_check(sk)) {
             scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SND_CWND);
     }
-    printk(KERN_DEBUG"stable_rtt: curr_cwnd=%u\n", scc->curr_cwnd);
 }
 
-static void fairness_rtt(struct sock *sk)
+static void rate_cwnd(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
+    u32 rtt_rate, cwnd;
+    u8 rate;
+    rtt_rate = ((scc->curr_rtt << BW_SCALE_2) / 1000);
+    rtt_rate = (BW_SCALE_2 / rtt_rate) + 1;   
+    cwnd = (scc->curr_rtt * scc->curr_cwnd) / USEC_PER_SEC;
 
-    if ( scc->unfair_flag >= 20) {
-
-        u32 cwnd;
-        if(scc->bytes_in_flight)
-            cwnd = scc->last_acked_sacked + (scc->bytes_in_flight * 14) >> 4;
-        else
-            cwnd = scc->last_acked_sacked + (scc->curr_cwnd * 10) >> 4;
-        scc->curr_cwnd = max(cwnd, SCC_MIN_SND_CWND);
+    if(rtt_rate >= rate)
+    {
+        scc->curr_cwnd = cwnd;
+        rate++;
     }
-    printk(KERN_DEBUG"fairness_rtt: curr_cwnd=%u\n", scc->curr_cwnd);
 }
 
 static void overload_rtt(struct sock *sk)
@@ -153,7 +179,6 @@ static void overload_rtt(struct sock *sk)
         scc->curr_cwnd = scc->last_acked_sacked + (u32)(((u64)scc->curr_cwnd * 12) >> SCALE_BW_RTT);
         scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SND_CWND);
     }
-    printk(KERN_DEBUG"overload_rtt: curr_cwnd=%u\n", scc->curr_cwnd);
 }
 
 static void probe_rtt(struct sock *sk)
@@ -161,7 +186,6 @@ static void probe_rtt(struct sock *sk)
     struct scc *scc = inet_csk_ca(sk);
 
     stable_rtt(sk);
-    fairness_rtt(sk);
     overload_rtt(sk);
     printk(KERN_DEBUG"probe_rtt: curr_cwnd=%u\n", scc->curr_cwnd);
 }
@@ -183,8 +207,6 @@ static void update_min_rtt(struct sock *sk, const struct rate_sample *rs)
         scc->curr_rtt = MIN_RTT_US;
 
     if (scc->curr_rtt < scc->last_min_rtt || scc->last_min_rtt == 0) {
-        pr_debug("update_min_rtt: updating last_min_rtt from %u to %u\n",
-             scc->last_min_rtt, scc->curr_rtt);
         scc->last_min_rtt = scc->curr_rtt;
     }
 
@@ -196,13 +218,16 @@ static void update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 
     if (scc->last_min_rtt == 0) {
         scc->last_min_rtt = MIN_RTT_US;
-        pr_debug("update_min_rtt: last_min_rtt was 0, set to %u\n", scc->last_min_rtt);
     }
 
     if (scc->last_min_rtt > scc->curr_rtt) {
         scc->last_min_rtt = scc->curr_rtt;
         scc->epp_min_rtt++;
     }
+    printk(KERN_DEBUG "update_min_rtt: tcp_jiffies32=%u, tcp_wstamp_ns=%u,  delivered_mstamp=%u\n",
+        tcp_jiffies32, tp->tcp_mstamp, tp->tcp_wstamp_ns, tp->delivered_mstamp);
+    u32 cc, ww, rr;
+    cc = 
     scc->epp++;
 }
 
@@ -238,8 +263,10 @@ static void update_bandwidth_throughput(struct sock *sk, const struct rate_sampl
         beta = (u32)(scc->bw >> 2) >> BW_SCALE_2;
     scc->fairness_rat = gamma / (beta + MIN_BW);
 
-    if(scc->fairness_rat < 65536U)
-        scc->fairness_rat = 65536U;
+    if(scc->fairness_rat < 15646946U)
+        scc->fairness_rat = 15646946U;
+    if(scc->fairness_rat > 81989530U)
+        scc->fairness_rat = 81989530U;
 
     if((scc->bw >> BW_SCALE_2) < scc->curr_cwnd)
         scc->curr_cwnd = scc->bw >> BW_SCALE_2;
@@ -319,7 +346,8 @@ static void check_epoch_probes_rtt_bw(struct sock *sk)
         scc->epp_min_rtt = 0;
         scc->current_mode = MODE_PROBE_BW;
     } else {
-        if(!rtt_check(sk) && scc->unfair_flag >= 30 && !check_hight_rtt(sk))
+        if((!rtt_check(sk) && scc->unfair_flag >= 30 && !check_hight_rtt(sk)) || 
+            scc->unfair_flag >= 60)
             scc->current_mode = MODE_PROBE_RTT;
         else
             scc->current_mode = MODE_PROBE_BW;
@@ -357,38 +385,50 @@ static u32 spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
 {
     struct tcp_sock *tp = tcp_sk(sk);
     struct scc *scc = inet_csk_ca(sk);
-    u64 gain, cwnd;
-    u32 rtt;
+    u64 gain, tg;
+    u32 rtt, st, un;
     fairness_check(sk);
+    stable_check(sk);
     spline_max_cwnd(sk);
+
+    scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_ack);
+    if(scc->cwnd_gain < 15646946U)
+        scc->cwnd_gain = 15646946U;
+
+    if(scc->cwnd_gain > 81989530U)
+        scc->cwnd_gain = 81989530U;
+
+    st = (u32)scc->stable_flag;
+    un = (u32)scc->unfair_flag;
+
+    st = st ? st : 1;
+    un = un ? un : 1;
+    tg = ((((u64)st * 3) << BW_SCALE_2) >> 2) / 
+    (((un * 3) << BW_SCALE) >> 1);
 
     rtt = scc->last_min_rtt;
     rtt =  scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
-    printk(KERN_DEBUG "cwnd_next_gain: before curr_cwnd=%u, max_could_cwnd=%u, cwnd_gain=%u, unfair_flag=%u, curr_rtt=%u\n",
-         scc->curr_cwnd, scc->max_could_cwnd, scc->cwnd_gain, scc->unfair_flag, scc->curr_rtt);
+    printk(KERN_DEBUG "cwnd_next_gain: before curr_cwnd=%u, max_could_cwnd=%u, unfair_flag=%u, curr_rtt=%u, stable_flag=%u\n",
+         scc->curr_cwnd, scc->max_could_cwnd, scc->unfair_flag, scc->curr_rtt, scc->stable_flag);
 
-    if((ack_check(sk) && ((!rtt_check(sk) || scc->unfair_flag >= 10) || scc->unfair_flag >= 60)) || !check_hight_rtt(sk))
+    if(scc->unfair_flag >= 20 || !check_hight_rtt(sk))
     {
-        scc->cwnd_gain = spline_cwnd_gain(sk, scc->last_ack);
-        if(scc->cwnd_gain < 65536U)
-            scc->cwnd_gain = 65536U;
-
         rtt = (rtt + scc->curr_rtt) >> 1;
         gain = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
-        printk(KERN_DEBUG "cwnd_next_gain_inslide: before curr_cwnd=%u\n", scc->curr_cwnd);
-        scc->curr_cwnd = (u32)(div_u64(gain, rtt) >> BW_SCALE_2) + scc->curr_ack + scc->max_could_cwnd;
-    } else {
-        scc->cwnd_gain = spline_cwnd_gain(sk, scc->curr_ack);
-        if(scc->cwnd_gain < 65536U)
-            scc->cwnd_gain = 65536U;
-        printk(KERN_DEBUG "cwnd_next_gain_no_inslide: before curr_cwnd=%u\n", scc->curr_cwnd);
-        gain = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
-        scc->curr_cwnd = (u32)(div_u64(gain, rtt) >> BW_SCALE_2) + scc->curr_ack + scc->max_could_cwnd;
-        if(scc->fairness_rat < 65536U)
-            scc->fairness_rat = 65536U;
+        printk(KERN_DEBUG "cwnd_next_gain_inslide: before curr_cwnd=%u, cwnd_gain=%u, tg=%u\n", scc->curr_cwnd, scc->cwnd_gain, tg);
+        scc->curr_cwnd = (u32)(div_u64(gain, rtt) >> BW_SCALE_2) + scc->max_could_cwnd;
+        scc->curr_cwnd = percent_fine(sk, scc->unfair_flag, scc->curr_cwnd);
+        scc->curr_cwnd = ((scc->curr_cwnd * tg) >> BW_SCALE) + scc->curr_ack;
         scc->curr_cwnd = (u32)(((u64)scc->fairness_rat * scc->curr_cwnd) >> BW_SCALE_2);
+    } else if(st > (un >> 2)) {
+        gain = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
+        scc->curr_cwnd = (u32)(div_u64(gain, rtt) >> BW_SCALE_2) + (scc->curr_ack >> 1);
+    } else {
+        gain = (u64)scc->cwnd_gain * scc->bw * USEC_PER_SEC;
+        scc->curr_cwnd = (u32)(div_u64(gain, rtt) >> BW_SCALE_2);
     }
-    printk(KERN_DEBUG "cwnd_next_gain: after curr_cwnd=%u, scc->loss_flag=%u\n", scc->curr_cwnd, scc->max_could_cwnd);
+
+    printk(KERN_DEBUG "cwnd_next_gain: after curr_cwnd=%u\n", scc->curr_cwnd);
     return scc->curr_cwnd;
 }
 
@@ -472,7 +512,6 @@ static void update_last_acked_sacked_cwnd_mss(struct sock *sk, const struct rate
     scc->min_cwnd = SCC_MIN_SND_CWND;
     if (scc->mss == 0)
         scc->mss = SCC_MIN_SEGMENT_SIZE;
-    if(scc->unfair_flag > 5 && scc->curr_cwnd > SCC_MIN_SND_CWND)
 
     spline_check_main(sk);
     scc->curr_cwnd = (u64)tcp_snd_cwnd(tp) * scc->mss;
