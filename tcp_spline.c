@@ -12,11 +12,11 @@
 #define SPLINE_SCALE    10
 #define SCALE_BW_RTT    4
 #define BW_SCALE        12
-#define MIN_RTT_US      50000   /* 50 ms */
+#define MIN_RTT_US      100000   /* 50 ms */
 #define MIN_BW          14480    /* Minimum bandwidth in bytes/sec */
 
 #define SCC_MIN_RTT_WIN_SEC 10
-#define SCC_MIN_SEGMENT_SIZE    1448
+#define SCC_MIN_SEGMENT_SIZE 1448
 #define SCC_MIN_SND_CWND    10
 
 enum spline_cc_mode {
@@ -69,13 +69,14 @@ struct scc {
 #define CYCLE_LEN   8
 static const int bbr_bw_rtts = CYCLE_LEN + 2;
 static const u32 bbr_lt_bw_diff = 4000 / 8;
-static const u16 thresh_tg = 10434853;
+static const u64 thresh_tg = 2013567;
 static const u32 bbr_lt_bw_ratio = BBR_UNIT >> 3;
 static const int bbr_pacing_margin_percent = 1;
 static const u32 bbr_lt_bw_max_rtts = 48;
 static const u32 bbr_lt_intvl_min_rtts = 4;
 static const u32 bbr_lt_loss_thresh = 3;
 static const int bbr_high_gain  = BBR_UNIT * 2800 / 1000;
+static const int cwnd_rtt_gain  = BBR_UNIT * 1300 / 1000;
 static const int bbr_drain_gain = BBR_UNIT * 1000 / 2885;
 static const int scc_drain_gain = 5646946;
 static const int scc_high_gain  = 45646946;
@@ -280,8 +281,8 @@ static u32 fairness_rat(u64 gamma, u32 beta)
     beta = (u32)(gamma >> 2) >> BW_SCALE_2;
     fairness_rat = gamma / (beta + MIN_BW);
 
-    if(fairness_rat < 14646946U)
-        fairness_rat = 16646946U;
+    if(fairness_rat < 6646946U)
+        fairness_rat = 6646946U;
     if(fairness_rat > 21989530U)
         fairness_rat = 21989530U;
 
@@ -569,7 +570,7 @@ static void check_epoch_probes_rtt_bw(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
     u64 tg = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
-    if((scc->unfair_flag >= 2000) || tg < thresh_tg)
+    if(tg < thresh_tg)
         scc->current_mode = MODE_PROBE_RTT;
     else
         scc->current_mode = MODE_PROBE_BW;
@@ -624,8 +625,8 @@ static u64 cwnd_gain(struct sock *sk)
     struct scc *scc = inet_csk_ca(sk);
     u64 cwnd_gain;
     cwnd_gain = (u64)spline_cwnd_gain(sk, scc->curr_ack);
-    if(cwnd_gain < 12646946U)
-        cwnd_gain = 12646946U;
+    if(cwnd_gain < 6646946U)
+        cwnd_gain = 6646946U;
 
     if(cwnd_gain > 45390997U)
         cwnd_gain = 45390997U;
@@ -647,8 +648,8 @@ static u32 spline_gain(struct sock *sk)
     rtt =  scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
     gain = cwnd_spline_gain * bw * USEC_PER_SEC;
 
-    if(gain < 15646946U)
-        gain = 15646946U;
+    if(gain < 6646946U)
+        gain = 6646946U;
     if(gain > 47390997U)
         gain = 43390997U;
     scc->gain = gain;
@@ -708,7 +709,7 @@ static void spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
         scc->curr_cwnd = (scc->curr_cwnd * tg) >> BW_SCALE;
     scc->curr_cwnd = max(scc->curr_cwnd, cwnd);
     loss_cwnd(sk);
-    scc->curr_cwnd += rs->acked_sacked; 
+    scc->curr_cwnd += rs->acked_sacked;
 }
 
 static void spline_save_cwnd(struct sock *sk)
@@ -787,12 +788,11 @@ static u32 next_cwnd(struct sock *sk, const struct rate_sample *rs,
 {
     struct scc *scc = inet_csk_ca(sk);
     u64 tg = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
-    if((scc->current_mode = MODE_PROBE_RTT ||
-     scc->stable_flag < 50) && scc->EPOCH_ROUND == 20 &&
-        scc->loss_cnt > 20){
+    if(tg < thresh_tg && scc->EPOCH_ROUND == 20 && 
+        scc->loss_cnt > 10){
         return cwnd;
     } 
-    else if((scc->unfair_flag > 2000 && scc->stable_flag < 300) ||
+    else if((scc->unfair_flag > 2000 && scc->stable_flag < 300) || 
         scc->unfair_flag > scc->stable_flag + 500) {
         return ((target_cwnd + cwnd) * 9) >> 4;
     } else {
@@ -804,12 +804,14 @@ static void spline_cwnd_send(struct sock *sk, const struct rate_sample *rs, u32 
 {
     struct scc *scc = inet_csk_ca(sk);
     struct tcp_sock *tp = tcp_sk(sk);
-    u32 cwnd_segments, target_cwnd, max_cwnd;
     u64 tg = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
+    u32 cwnd_segments, target_cwnd, max_cwnd;
     target_cwnd = scc_bdp(sk, bw, scc->gain);
     cwnd_segments = next_cwnd(sk, rs, target_cwnd, scc->curr_cwnd);
     cwnd_segments = max(cwnd_segments, SCC_MIN_SND_CWND);
-    printk(KERN_DEBUG "send: curr_cwnd=%u, cwnd_segments=%u, target_cwnd=%u\n", scc->curr_cwnd, cwnd_segments, target_cwnd);
+    cwnd_segments += rs->acked_sacked;
+    printk(KERN_DEBUG "next_cwnd: tg=%u, EPOCH_ROUND=%u, loss_cnt=%u, cwnd_segments=%u, curr_cwnd=%u, target_cwnd=%u\n", 
+        tg, scc->EPOCH_ROUND, scc->loss_cnt, cwnd_segments, scc->curr_cwnd, target_cwnd);
     tcp_snd_cwnd_set(tp, min(cwnd_segments, tp->snd_cwnd_clamp));
 }
 
