@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <net/tcp.h>
+#include <linux/random.h>
 
 #define BW_SCALE_2      24
 #define BW_UNIT (1 << BW_SCALE_2)
@@ -51,7 +52,7 @@ struct scc {
     u16 stable_flag;
     u32 rtt_cnt;
 
-    u16 epp:7,            /* Epoch cycle counter */
+    u16 epp:6,            /* Epoch cycle counter */
         EPOCH_ROUND:7;
     u32 lt_use_bw:1,
         current_mode:3,       /* Current mode (START_PROBE, etc.) */
@@ -61,20 +62,24 @@ struct scc {
         round_start:1,
         has_seen_rtt:1,
         high_round:6,
-        loss_cnt:8;
+        loss_cnt:8,
+        start_phase:1;
 };
 
 static const u32 bbr_lt_bw_diff = 500;
 /*пороговое значения для tf ()*/
-static const u64 thresh_tf = 2013567;
+static const u64 min_thesh_tf = 1713567;
+static const u64 thresh_tf = 3413567;
 static const u32 bbr_lt_bw_ratio = BBR_UNIT >> 3;
 static const int bbr_pacing_margin_percent = 1;
 static const u32 bbr_lt_bw_max_rtts = 48;
 static const u32 bbr_lt_intvl_min_rtts = 4;
-static const u32 scc_lt_loss_thresh = 2;
+static const u32 scc_lt_loss_thresh = 3;
 static const u32 bbr_lt_loss_thresh = 50;
-static const int bbr_high_gain  = 716;
-static const int bbr_drain_gain = 88;
+static const int bbr_high_gain  = 550;
+static const int bbr_rtt_gain  = 250;
+static const int bbr_drain_gain = 100;
+static const int bbr_start_gain = BBR_UNIT;
 static const int scc_drain_gain = 5646946;
 
 static u32 bytes_in_flight(struct sock *sk);
@@ -125,6 +130,18 @@ static u32 bytes_in_flight(struct sock *sk)
     return bytes_in_flight;
 }
 
+/*процентный gain: Нужен как раз для корректировки curr_cwnd на основе 
+    адаптационных флагов и прошлых потерь*/
+static u64 percent_gain(u32 last_lost, u32 st, u32 un)
+{
+    u64 tf;
+    st = st ? st : 1;
+    un = un ? un : 1;
+    tf = ((((u64)st * 3) << BW_SCALE_2) >> 2) /
+    ((((last_lost + un) * 3)) >> 1);
+    return tf;
+}
+
 /*Проверка на стабильности: ACK-ов и inflight для возможностм увеличения порога,
     тем самым увеличивая агрессивность алгоритма*/
 static void high_rtt_round(struct sock *sk)
@@ -140,10 +157,8 @@ static void high_rtt_round(struct sock *sk)
         inflight > scc->curr_cwnd * SCC_MIN_SEGMENT_SIZE)
     {
         scc->high_round = 0;
-        if(scc->rtt_epoch <= 60000)
+        if(scc->rtt_epoch < 1 << 15)
             scc->rtt_epoch += 4000;
-        else
-            scc->rtt_epoch = 64000;
     }
     else if(scc->high_round == 50)
         scc->high_round = 0;
@@ -180,13 +195,16 @@ static void loss_rate(struct sock *sk)
     struct tcp_sock *tp = tcp_sk(sk);
     struct scc *scc = inet_csk_ca(sk);
     u32 lost, delivered;
+    u64 tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
     lost = tp->lost - scc->lt_last_lost;
     delivered = tp->delivered - scc->lt_last_delivered;
-    if((lost << BBR_SCALE) > (delivered >> scc_lt_loss_thresh)) {
+
+    if((lost << BBR_SCALE) > (delivered >> scc_lt_loss_thresh) &&
+     scc->loss_cnt < 1 << 8) {
         scc->loss_cnt++;
     }
-    if(scc->loss_cnt > (1 << 8) - 2)
-        scc->loss_cnt = 1 << 7;
+    if(scc->loss_cnt > 1 && tf > thresh_tf)
+        scc->loss_cnt--;
 }
 
 static u64 scc_rate_bytes_per_sec(struct sock *sk, u64 rate, int gain)
@@ -295,17 +313,17 @@ static u32 fairness_rat(u64 gamma, u32 beta)
     u32 fairness_rat;
     if (!beta)
     beta = (u32)(gamma >> 2) >> BW_SCALE_2;
-    fairness_rat = gamma / (beta + MIN_BW);
+    fairness_rat = (u32)(gamma / beta);
 
-    if(fairness_rat < 6646946U)
-        fairness_rat = 6646946U;
+    if(fairness_rat < 16646946U)
+        fairness_rat = 16646946U;
     if(fairness_rat > 21989530U)
         fairness_rat = 21989530U;
 
     return fairness_rat;
 }
 
-static u32 update_bandwidth(struct sock *sk)
+static void update_bandwidth(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
     u32 beta;
@@ -314,9 +332,6 @@ static u32 update_bandwidth(struct sock *sk)
     throughput = inflight_throughput(sk);
 
     scc->fairness_rat = fairness_rat(bw, throughput);
-    bw = bw >> BW_SCALE_2;
-
-    return max((u32)bw, MIN_BW);
 }
 
 static void scc_lt_bw_interval_done(struct sock *sk, u32 bw)
@@ -483,7 +498,7 @@ static bool scc_is_next_cycle_phase(struct sock *sk,
              inflight >= scc_inflight(sk, bw, scc->pacing_gain));
 
     return is_full_length ||
-        inflight <= scc_inflight(sk, bw, scc->gain);
+        inflight <= scc_inflight(sk, bw, scc->cwnd_gain);
 }
 
 static void scc_update_bw(struct sock *sk, const struct rate_sample *rs)
@@ -550,32 +565,17 @@ static u32 spline_max_cwnd(struct sock *sk)
     throughput = inflight_throughput(sk);
     bw = bandwidth(sk);
 
-    if (!(throughput << 2))
-        throughput = 1;
-
     tmp = ((u64)scc->fairness_rat * (u64)scc->curr_cwnd) >> BW_SCALE_2;
-    max_could_cwnd = tmp;
+    max_could_cwnd = (u32)tmp;
     max_could_cwnd = max_could_cwnd ? max_could_cwnd : (SCC_MIN_SND_CWND << 1);
 
     return max_could_cwnd;
 }
 
-/*процентный gain: Нужен как раз для корректировки curr_cwnd на основе 
-    адаптационных флагов и прошлых потерь*/
-static u64 percent_gain(u32 last_lost, u32 st, u32 un)
-{
-    u64 tf;
-    st = st ? st : 1;
-    un = un ? un : 1;
-    tf = ((((u64)st * 3) << BW_SCALE_2) >> 2) /
-    (((last_lost + un * 3)) >> 1);
-    return tf;
-}
-
 static void start_probe(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
-    scc->curr_cwnd = SCC_MIN_SND_CWND + (scc->curr_cwnd << 1);
+    scc->curr_cwnd += SCC_MIN_SND_CWND;
     scc->curr_cwnd = max(scc->curr_cwnd, SCC_MIN_SND_CWND);
 }
 
@@ -592,7 +592,7 @@ static void check_epoch_probes_rtt_bw(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
     u64 tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
-    if(tf < thresh_tf)
+    if(tf < thresh_tf || scc->unfair_flag > scc->stable_flag)
         scc->current_mode = MODE_PROBE_RTT;
     else
         scc->current_mode = MODE_PROBE_BW;
@@ -604,12 +604,18 @@ static void check_probes(struct sock *sk)
 
     if (scc->epp == scc->EPOCH_ROUND) {
         scc->epp = 0;
-        scc->EPOCH_ROUND = 20;
+
+        if (scc->start_phase) {
+            scc->EPOCH_ROUND = 20;
+            scc->start_phase = 0;
+        } else {
+            scc->EPOCH_ROUND = 1 + (get_random_u32() % 31);
+        }
+
         check_epoch_probes_rtt_bw(sk);
         check_drain_probe(sk);
     }
 }
-
 
 static u32 spline_cwnd_gain(struct sock *sk, u32 cwnd)
 {
@@ -633,7 +639,7 @@ static void gains_mode(struct sock *sk)
         scc->pacing_gain = bbr_high_gain;
         break;
     case MODE_PROBE_RTT:
-        scc->pacing_gain = bbr_drain_gain;
+        scc->pacing_gain = bbr_rtt_gain;
         break;
     case MODE_DRAIN_PROBE:
         scc->pacing_gain = bbr_drain_gain;
@@ -655,8 +661,8 @@ static u64 cwnd_gain(struct sock *sk)
         cwnd_gain = 6646946U;
 
     /*не больше 2.705514252*/
-    if(cwnd_gain > 45390997U)
-        cwnd_gain = 45390997U;
+    if(cwnd_gain > 37390997U)
+        cwnd_gain = 37390997U;
 
     return cwnd_gain;
 }
@@ -671,17 +677,14 @@ static u32 spline_gain(struct sock *sk)
     gains_mode(sk);
     cwnd_spline_gain = cwnd_gain(sk);
 
-    rtt = scc->last_min_rtt;
-    rtt =  scc->last_min_rtt ? scc->last_min_rtt : MIN_RTT_US;
-    gain = cwnd_spline_gain * bw * USEC_PER_SEC;
-
+    rtt = (scc->last_min_rtt + scc->curr_rtt) >> 1;
+    rtt =  rtt ? rtt : MIN_RTT_US;
+    gain = cwnd_spline_gain * bw;
+    gain = gain * rtt;
     /*не меньше 0.3961888552*/
-    if(gain < 6646946U)
-        gain = 6646946U;
+    if(gain < 646946U)
+        gain = 646946U;
 
-    /*не больше 2.824723542*/
-    if(gain > 47390997U)
-        gain = 43390997U;
     scc->gain = gain;
     scc->cwnd_gain = cwnd_spline_gain;
 
@@ -698,15 +701,16 @@ static u32 cwnd_loss_phase(struct sock *sk, u64 gain, u32 rtt)
     u32 cwnd;
     rtt = (rtt + scc->curr_rtt) >> 1;
 
-    cwnd = (u32)(div_u64(scc->gain, rtt));
-    cwnd = (u32)(((u64)scc->fairness_rat * cwnd) >> BW_SCALE_2);
+    cwnd = (u32)(div_u64(gain, (u64)rtt));
+    cwnd = (u32)(((u64)scc->fairness_rat * (u64)cwnd) >> BW_SCALE_2);
     return cwnd;
-}
+} 
+
 /*Отбой паники, действует более агрессивно*/
 static u32 cwnd_stable_phase(u64 gain, u32 rtt)
 {
     u32 cwnd;
-    cwnd = (u32)(div_u64(gain, rtt)) >> BW_SCALE_2;
+    cwnd = (u32)(div_u64(gain, (u64)rtt)) >> BW_SCALE_2;
     return cwnd;
 }
 
@@ -715,8 +719,7 @@ static void loss_backoff_cwnd(struct sock *sk)
 {
     struct scc *scc = inet_csk_ca(sk);
     u32 ls = scc->loss_cnt;
-    u64 tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
-    if (ls > 13)  ls = 13;
+    if (ls > 12)  ls = 12;
     if (ls > 9) {
         scc->curr_cwnd = (u32)((u64)scc->curr_cwnd * ls * ls * ls) >> ls;
     }
@@ -726,24 +729,24 @@ static void spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
 {
     struct tcp_sock *tp = tcp_sk(sk);
     struct scc *scc = inet_csk_ca(sk);
-    u64 tf;
-    u32 rtt, cwnd, new_cwnd;
-
+    u64 tf, bw;
+    u32 rtt, cwnd;
+    bw = bandwidth(sk);
     rtt = spline_gain(sk);
-    cwnd = spline_max_cwnd(sk);
+    cwnd = spline_max_cwnd(sk) >> 3;
     tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
 
-    if(scc->unfair_flag >= 2000 || !check_high_rtt(sk)) {
+    if((scc->unfair_flag > 2000 || !check_high_rtt(sk)) || scc->loss_cnt > 10) {
         scc->curr_cwnd = cwnd_loss_phase(sk, scc->gain, rtt);
     } else {
-        rtt = scc->last_min_rtt;
         scc->curr_cwnd = cwnd_stable_phase(scc->gain, rtt);
     }
-    if(tf < thresh_tf)
-        scc->curr_cwnd = (scc->curr_cwnd * tf) >> BW_SCALE;
-    scc->curr_cwnd = max(scc->curr_cwnd, cwnd);
 
     loss_backoff_cwnd(sk);
+    if(tf < min_thesh_tf)
+        tf = min_thesh_tf;
+    scc->curr_cwnd = (scc->curr_cwnd * tf) >> BW_SCALE_2;
+    scc->curr_cwnd = max(scc->curr_cwnd, cwnd);
     scc->curr_cwnd += rs->acked_sacked;
 }
 
@@ -765,7 +768,7 @@ static void update_probes(struct sock *sk, const struct rate_sample *rs)
     check_probes(sk);
     switch (scc->current_mode) {
     case MODE_START_PROBE:
-        scc->pacing_gain = bbr_high_gain;
+        scc->pacing_gain = bbr_start_gain;
         start_probe(sk);
         break;
     case MODE_PROBE_BW:
@@ -807,8 +810,8 @@ static void spline_update(struct sock *sk,
     struct scc *scc = inet_csk_ca(sk);
     update_min_rtt(sk, rs);
     update_last_acked_sacked(sk, rs);
-    if(scc_is_next_cycle_phase(sk, rs) ||
-        scc->EPOCH_ROUND == 50)
+    if (scc_is_next_cycle_phase(sk, rs) || 
+        scc->start_phase) 
         update_bandwidth(sk);
     scc_update_bw(sk, rs);
     fairness_check(sk);
@@ -826,13 +829,13 @@ static u32 next_cwnd(struct sock *sk, const struct rate_sample *rs,
 {
     struct scc *scc = inet_csk_ca(sk);
     u64 tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
-    if(tf < thresh_tf && scc->EPOCH_ROUND == 20 &&
-        scc->loss_cnt > 10){
+    if(tf < thresh_tf && !scc->start_phase &&
+        scc->loss_cnt > 50){
         return cwnd;
     }
-    else if((scc->unfair_flag > 2000 && scc->stable_flag < 300) ||
-        scc->unfair_flag > scc->stable_flag + 500) {
-        return ((target_cwnd + cwnd) * 9) >> 4;
+    else if(((scc->unfair_flag > 2000 && scc->stable_flag < 300) ||
+        scc->unfair_flag > scc->stable_flag + 500) && scc->loss_cnt > 5) {
+        return ((target_cwnd + cwnd) * 7) >> 4;
     } else {
         return max(target_cwnd, cwnd);
     }
@@ -844,7 +847,7 @@ static void spline_cwnd_send(struct sock *sk, const struct rate_sample *rs, u32 
     struct tcp_sock *tp = tcp_sk(sk);
     u64 tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
     u32 cwnd_segments, target_cwnd, max_cwnd;
-    target_cwnd = scc_bdp(sk, bw, scc->gain);
+    target_cwnd = scc_bdp(sk, bw, scc->cwnd_gain);
     cwnd_segments = next_cwnd(sk, rs, target_cwnd, scc->curr_cwnd);
     cwnd_segments = max(cwnd_segments, SCC_MIN_SND_CWND);
     cwnd_segments += rs->acked_sacked;
@@ -856,7 +859,7 @@ static void spline_main(struct sock *sk, const struct rate_sample *rs)
     struct tcp_sock *tp = tcp_sk(sk);
     struct scc *scc = inet_csk_ca(sk);
     u32 bw;
-
+    scc->curr_cwnd = tcp_snd_cwnd(tp);
     spline_update(sk, rs);
     bw = scc_bw(sk);
     bbr_set_pacing_rate(sk, bw, scc->pacing_gain);
@@ -899,7 +902,7 @@ static void spline_init(struct sock *sk)
     scc->current_mode = MODE_START_PROBE;
     scc->cycle_mstamp = 0;
     scc->lt_rtt_cnt = 0;
-    scc->EPOCH_ROUND = 50;
+    scc->EPOCH_ROUND = 10 + (get_random_u32() % 31);
     scc->rtt_epoch = 4000;
     scc->last_min_rtt_stamp = tcp_jiffies32;
     scc->lt_rtt_cnt = 0;
