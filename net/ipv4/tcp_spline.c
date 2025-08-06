@@ -751,14 +751,16 @@ static void spline_cwnd_next_gain(struct sock *sk, const struct rate_sample *rs)
     cwnd = spline_max_cwnd(sk) >> 3;
     tf = percent_gain(scc->lt_last_lost, scc->stable_flag, scc->unfair_flag);
 
-    if((scc->unfair_flag > 2000 && !check_high_rtt(sk)) || scc->loss_cnt > 10) {
+    if((scc->unfair_flag > 2000 || !check_high_rtt(sk)) || scc->loss_cnt > 10) {
         scc->curr_cwnd = cwnd_loss_phase(sk, scc->gain, rtt);
     } else {
         scc->curr_cwnd = cwnd_stable_phase(scc->gain, rtt);
     }
 
     loss_backoff_cwnd(sk);
-
+    if(tf < min_thesh_tf)
+        tf = min_thesh_tf;
+	
     scc->curr_cwnd = (scc->curr_cwnd * tf) >> BW_SCALE_2;
     scc->curr_cwnd = max(scc->curr_cwnd, cwnd);
     scc->curr_cwnd += rs->acked_sacked;
