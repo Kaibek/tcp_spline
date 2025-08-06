@@ -26,17 +26,17 @@ enum spline_cc_mode {
 };
 
 struct scc {
-    u32 curr_cwnd;      /* Current congestion window (bytes) */
-    u32 last_min_rtt;       /* Minimum RTT (us) */
-    u32 last_ack;       /* Last acknowledged bytes */
-    u32 curr_ack;       /* Newly delivered bytes */
+    u32 curr_cwnd;      
+    u32 last_min_rtt;       
+    u32 last_ack;      
+    u32 curr_ack;      
     u32 fairness_rat;
     u32 last_rtt;
     u32 curr_rtt;
     u32 gain;
     u32 cwnd_gain;
 
-    u64 cycle_mstamp;        /* time of this cycle phase start */
+    u64 cycle_mstamp;       
     u32 bw;
     u32 lt_bw;
     u32 last_min_rtt_stamp; /* Timestamp for min RTT update */
@@ -55,8 +55,8 @@ struct scc {
     u16 epp:6,            /* Epoch cycle counter */
         EPOCH_ROUND:7;
     u32 lt_use_bw:1,
-        current_mode:3,       /* Current mode (START_PROBE, etc.) */
-        prev_ca_state:3,    /* Previous TCP_CA state */
+        current_mode:3,       
+        prev_ca_state:3,    
         lt_is_sampling:1,
         lt_rtt_cnt:7,
         round_start:1,
